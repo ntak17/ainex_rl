@@ -158,3 +158,8 @@ class ActorCritic(nn.Module):
     def evaluate(self, critic_observations, **kwargs):
         value = self.critic(critic_observations)
         return value
+
+#==> ArtorCritic là trái tim của PPO algorithm 
+# 1 Actor quyết định hành động (policy)
+# 2 Critic: Đánh giá tốt / xấu của state (value function)
+# 

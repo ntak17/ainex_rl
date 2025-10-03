@@ -29,27 +29,32 @@
 #
 # Copyright (c) 2024 Beijing RobotEra TECHNOLOGY CO.,LTD. All rights reserved.
 
-import os
-import time
-import torch
-# import wandb
-import statistics
-from collections import deque
-from datetime import datetime
-from .ppo import PPO
-from .actor_critic import ActorCritic
-from humanoid.algo.vec_env import VecEnv
-from torch.utils.tensorboard import SummaryWriter
+import os #quản lí đường dẫn file
+import time #đo thời gian rollout & learning
+import torch #core deep learning framework
+# import wandb 
+import statistics #tính mean của reward buffer
+from collections import deque # dùng quêu cố đinh kích thước cho reward/length buffer
+from datetime import datetime # tạo timestamp cho tên experiment
+from .ppo import PPO # class thuật toán PPO
+from .actor_critic import ActorCritic # Neural network model
+from humanoid.algo.vec_env import VecEnv # interface môi trường vertorized
+from torch.utils.tensorboard import SummaryWriter # Ghi log TensorBoard
 
 
 class OnPolicyRunner:
 
     def __init__(self, env: VecEnv, train_cfg, log_dir=None, device="cpu"):
+        # env: môi trường vectorized, train_cfg: config dict chứa toàn bộ hyperparameters, log_dir: đường dẫn lưu logs & checkpoint
+        # device: cpu hoặc cuda
 
+        # lấy tham số config chung chung
         self.cfg = train_cfg["runner"]
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
         self.all_cfg = train_cfg
+
+
         # self.wandb_run_name = (
         #     datetime.now().strftime("%b%d_%H-%M-%S")
         #     + "_"
@@ -59,14 +64,22 @@ class OnPolicyRunner:
         # )
         self.device = device
         self.env = env
+
+        # xác định số chiều critic observation, xác định nên tạo bao nhiêu chiều observation
         if self.env.num_privileged_obs is not None:
             num_critic_obs = self.env.num_privileged_obs
         else:
             num_critic_obs = self.env.num_obs
+
+        # Lấy giá trị của biến cấu hình policy_class_name là parse sang class mới
         actor_critic_class = eval(self.cfg["policy_class_name"])  # ActorCritic
+
+        # đối tượng của chúng ta đã khai báo ở trên và chuyển model lên trên gpu
         actor_critic: ActorCritic = actor_critic_class(
             self.env.num_obs, num_critic_obs, self.env.num_actions, **self.policy_cfg
         ).to(self.device)
+
+        # lấy giá trị của biến algorithm_class_name nhằm mục đích để lấy được tên class áp dụng thuật toán
         alg_class = eval(self.cfg["algorithm_class_name"])  # PPO
         self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
         self.num_steps_per_env = self.cfg["num_steps_per_env"]

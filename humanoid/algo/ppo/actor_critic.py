@@ -33,6 +33,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Normal
 
+# test kitare
 class ActorCritic(nn.Module):
     def __init__(self,  num_actor_obs,
                         num_critic_obs,

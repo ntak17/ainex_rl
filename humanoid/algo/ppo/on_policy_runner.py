@@ -81,30 +81,55 @@ class OnPolicyRunner:
 
         # lấy giá trị của biến algorithm_class_name nhằm mục đích để lấy được tên class áp dụng thuật toán
         alg_class = eval(self.cfg["algorithm_class_name"])  # PPO
+
+        # khởi động một instance của lớp thuật toán học được chỉ định trong cấu hình
+        # self alg sẽ tự động quản lý toàn bộ quá trình học của policy chính sách và value function trong thuật toán PPO
+        # mục đích: sau khi khởi tạo self.alg sẽ có các phương thức như act() (để lấy hành động),
         self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
+
+        # Thiết lập số bước steps thu thập dữ liệu trong mỗi môi trường env cho mỗi iteration học. Giá trị này được lấy từ self.cfg 
+        # Ngữ cảnh: trong mỗi PPO, mỗi iteration học bao gồm một giai đoạn thu thập dữ liệu và mõi giai đoạn cập nhật mô hinhf
+        # và num_steps_per_env sẽ quyết định độ dài của rollout trong mỗi môi trường 
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
+
+        # Thiết lập khoản thời gian interval để lưu trạng thái mô hình (checkpoint) trong quá trình học 
+        # Trong rl việc lưu mô hình định kì giúp tránh mất dữ liệu nếu quá trình học bị gián đoạn 
         self.save_interval = self.cfg["save_interval"]
 
         # init storage and model
+        # khởi tạo bộ nhớ lưu trữ storage để quản lý dữ liệu rollout. Trong PPO, thuật toán cần được thu thập dữ liệu từ môi trường trước khi thực hiện bước
+        # cập nhật mô hình. Bộ nhớ này giúp lưu trữ dữ liệu đó một cách hiệu quả
         self.alg.init_storage(
-            self.env.num_envs,
-            self.num_steps_per_env,
-            [self.env.num_obs],
-            [self.env.num_privileged_obs],
-            [self.env.num_actions],
+            self.env.num_envs, # số lượng môi trường chạy song song
+            self.num_steps_per_env, # Số lượng bước steps thu thập dữ liệu trong mỗi môi trường cho một iteration rollout
+            [self.env.num_obs],# Shape của quan sát dành cho actor
+            [self.env.num_privileged_obs], # Shape quan sát dành cho critic
+            [self.env.num_actions], #Shape của hành động. Shape của hành động action 
         )
-
+        
         # Log
-        self.log_dir = log_dir
-        self.writer = None
-        self.tot_timesteps = 0
-        self.tot_time = 0
-        self.current_learning_iteration = 0
+        self.log_dir = log_dir # thư mục lưu trữ log
+        self.writer = None # khởi tạo writer cho TensorBoard 
+        self.tot_timesteps = 0 # khởi tạo biến đếm tổng số timestep đã thu thập từ tát cả môi trường trong toàn bộ quá trình học 
+        self.tot_time = 0 #khởi tạo biến đếm tổng số thời gian đã trôi qua trong suốt quá trình học
+        self.current_learning_iteration = 0 # khởi tạo biến đến số interation học hiện tại, bắt đầu từ 0, và sẽ tăng lên sau mỗi vòng lặp learn()
+        # => nó giúp theo dõi tiến độ học. Khi lưu mô hình qua save(), iteration này được lưu cùng với state dict để có thể resume tranning từ điểm dừng.
+        #   Nó cũng được dùng trong logging để hiển thị iteration hiện tại.
 
         _, _ = self.env.reset()
 
+    # chịu trách nhiệm chạy vòng lặp học PPO trong nhiều iterations. Nó tích hợp rollout (thu thập từ môi trường), cập nhật mô hình, logging và lưu checkpoint
+    # ==> num_learning_interations(int): Số lượng iteration học mà bạn muốn thực hiện. Mối iteration là một vòng lặp chính bao gồm
+    #   + Thu thập dữ liệu từ rollout từ môi tường sử dung self.num_steps_per_env cho mỗi môi trường 
+    #   + Tính toán return và advantage từ dữ liệu rollout
+    #   + Cập nhật mô hình PPO bao gồm tối ưu hoá policy (actor) và value function (critic)
+    #   Giá trị này được cộng vào self.current_learning để theo dõi tổng số iteration đã chạy. Ví dụ, nếu bạn gọi learn(100), nó sẽ chạy từ iteration hiện tại đến 99
+    #   Điều này giúp resume training nếu cần 
+    # ==> init_at_random_ep_len: hệ thống sẽ khởi tạo độ dài episode hiện tại cho tất cả môi trường. Điều này sẽ giúp cho việc bắt đầu trainning  từ một episode, thay vì từ đầu
+    #       Hữu ích khi resume trainning lại một episode, thay vì từ đầu (độ dài = 0)
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         # initialize writer
+        # Thiết lập summary writer từ tensorboard để ghi log các metric (như loss, reward) vào thư mục log dir 
         if self.log_dir is not None and self.writer is None:
             # wandb.init(
             #     project="XBot",
@@ -112,15 +137,28 @@ class OnPolicyRunner:
             #     name=self.wandb_run_name,
             #     config=self.all_cfg,
             # )
+            # Toạ một SummaryWriter để ghi log các metrics (như loss, reward, ) vào thư mục log_dir và ghi ra disk mỗi 10s để đảm bảo dữ liệu không bị mất
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
+
+        # nếu thiết lập độ dại episode hiện tại của môi trường (episode_length_buf) thành một giá trị ngẫu nhiên, điều này làm cho việc bắt đàu trainning từ giữa một episode
+        # thay vì từ đầu   
         if init_at_random_ep_len:
+            # torch.randint_like(): tạo tensor ngẫu nhiên có cùng shape như episode_length_buf, độ dài từ 0 đến max_episode_length
+            # Hữu ích khi resume training từ checkpoint, để tăng đa dạng hoá à tránh bắt đàu từ trạng thái giống nhau từ bất kì bước nào từ 0 đến 999
+            # 
             self.env.episode_length_buf = torch.randint_like(
                 self.env.episode_length_buf, high=int(self.env.max_episode_length)
             )
+        # lấy observation từ môi trường, đây là dữ liệu trạng thái hiện tại của môi trường( như vị trí, vận tốc của humanoid robot). Tensor này có shape num_envs, num_privileged_obs
         obs = self.env.get_observations()
+        # lấy tensor quan sát dành cho critic, đây có thể là thông tin nội bộ đặc quyền không có sẵn
         privileged_obs = self.env.get_privileged_observations()
+        # chọn quan sát cho critic. Nếu có privileged_obs, dùng nó nếu không dùng obs thông thường. Điều này đảm bảo critic có dữ liệu phù hợp để đánh giá giá trị
         critic_obs = privileged_obs if privileged_obs is not None else obs
+        # Di chuyển tensors obs và critic_obs từ device của môi trường sang self.device (có thể là CPU hoặc GPU), được thiết lập trong _init_. 
+        # Điều này đảm bảo dữ liệu tương thích với mô hình và tính toán trên GPU nếu cần, tăng tốc độ.
         obs, critic_obs = obs.to(self.device), critic_obs.to(self.device)
+        # Điều này bật các thành phần như dropout, batch normalization giúp mô hình học tốt hơn trong quá trình rollout và update. Ngược klaij trong inference, mô hình sẽ chuyển ang eval() để dropout
         self.alg.actor_critic.train()  # switch to train mode (for dropout for example)
 
         ep_infos = []

@@ -158,43 +158,71 @@ class OnPolicyRunner:
         # Di chuyển tensors obs và critic_obs từ device của môi trường sang self.device (có thể là CPU hoặc GPU), được thiết lập trong _init_. 
         # Điều này đảm bảo dữ liệu tương thích với mô hình và tính toán trên GPU nếu cần, tăng tốc độ.
         obs, critic_obs = obs.to(self.device), critic_obs.to(self.device)
-        # Điều này bật các thành phần như dropout, batch normalization giúp mô hình học tốt hơn trong quá trình rollout và update. Ngược klaij trong inference, mô hình sẽ chuyển ang eval() để dropout
+        # Điều này bật các thành phần như dropout, batch normalization giúp mô hình học tốt hơn trong quá trình rollout và update. Ngược lại trong inference, mô hình sẽ chuyển ang eval() để dropout
         self.alg.actor_critic.train()  # switch to train mode (for dropout for example)
 
+        # Khởi tạo danh sách trống để lưu trữ thông tin bổ sung về các episode. Mỗi episode có thể chứa các metadata như reward tổng, độ dài episode hoặc các metrics khác từ môi trường
         ep_infos = []
+        # Khởi tạo một deque hàng đợi kép để lưu trữ reward tổng của các episode đã hoàn thành gần nhất. maxlen=100 giới hạn deque chỉ giữ 100 giá trị gần nhất, tự động loại bỏ cũ hơn khi vượt quá
         rewbuffer = deque(maxlen=100)
+        # Tương tụ rewbuffer nhưng lưu độ dài số bước của các episode đã hoàn thành gần nhất
         lenbuffer = deque(maxlen=100)
+        # Tạo một tensor zero với shape [num_envs], để tích luỹ reward của episode hiện tại trong mỗi môi trường (environment) 
         cur_reward_sum = torch.zeros(
             self.env.num_envs, dtype=torch.float, device=self.device
         )
+        # Khởi tạo tensor zero với shape [num_envs], để đếm số bước trong episode hiện tại của mỗi môi trường
         cur_episode_length = torch.zeros(
             self.env.num_envs, dtype=torch.float, device=self.device
         )
 
+        # Tính toán tổng số iteration sẽ thực hiện trong quá trình học. tot_iter là điểm kết thúc vòng lặp, bằng iteration hiện tại (self.current_learning_iteration) cộng với số iteration được yêu cầu.
+        # Việc cộng dồn sẽ đảm bảo mô hình sẽ bắt đầu học từ nơi dừng lại mà không làm lại từ đầu
+        # current_learning_iteration: vòng lặp hiện tại
+        # num_learning_iterations số vòng lặp yêu cầu
         tot_iter = self.current_learning_iteration + num_learning_iterations
+
+
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
             # Rollout
+            # Vô hiệu hoá tính toán gradient trong khối code này. Điều này tăng tốc rollout vì không cần lưu trữ gradient cho backpropagation
             with torch.inference_mode():
+                # Ý nghĩa: vòng lặp thu thập dữ liệu trong self.num_steps_per_env bước. Mỗi bước tương ứng với một hành động trong môi trường
                 for i in range(self.num_steps_per_env):
+                    # Thu thập hành động từ policy actor của mô hình PPO self.alg.act trả về action dựa trên observation
                     actions = self.alg.act(obs, critic_obs)
+                    # Thực hiện hành động action trong môi trường vectorized VecEnv, trả về: 
+                    # obs: Observation mới cho actor
+                    # privileged_obs: Observation cho critic(nếu có)
+                    # reward: phần thưởng từ bước này
+                    # dones: Flags chỉ ra episode kết thúc nếu dones
+                    # info: thông tin bổ sung
                     obs, privileged_obs, rewards, dones, infos = self.env.step(actions)
+                    #Chọn observations cho critic. Nếu có privileged_obs, dùng nó khọng thì dùng obs thông thường
                     critic_obs = privileged_obs if privileged_obs is not None else obs
+                    # Chuyển tất cả tensor từ device của môi trường sáng self device. Điều này đảm bảo tính toán đúng device 
                     obs, critic_obs, rewards, dones = (
                         obs.to(self.device),
                         critic_obs.to(self.device),
                         rewards.to(self.device),
                         dones.to(self.device),
                     )
+
+                    # Xử lý dữ liệu từ môi trường, thêm transition vào storage, bao gồm lưu reward
                     self.alg.process_env_step(rewards, dones, infos)
 
                     if self.log_dir is not None:
                         # Book keeping
                         if "episode" in infos:
                             ep_infos.append(infos["episode"])
+                        # Tính tổng reward sau các bước step trong môi trường    
                         cur_reward_sum += rewards
+                        # Tăng độ dài episode hiện tại cho tất cả môi trường(num_envs lên 1)
                         cur_episode_length += 1
+                        # Tìm ra indices(chỉ số) của các môi trường có episode kết thúc
                         new_ids = (dones > 0).nonzero(as_tuple=False)
+                        # thêm reward tổng của những env trong new_ids 
                         rewbuffer.extend(
                             cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist()
                         )
@@ -209,8 +237,12 @@ class OnPolicyRunner:
 
                 # Learning step
                 start = stop
+                # Phương thức compute_returns từ instance PPO (self.alg). Phương thức này tính tính toán returns và advantages cho tất cả dữ liệu rollout đã thu thập
                 self.alg.compute_returns(critic_obs)
-
+            # mean_value_loss: là giá trị mất mát trung bình của value function trong critic. Value Function dự đoán giá trị của trạng thái hiện tại. Loss này đo lương sai lệch giữa dự đoán
+            # của critic và giá trị thực tế returns, giá trị thấp là tốt. Giá trị lớn là đang học chậm.
+            # mean_surrogate_loss đây là giá trị mất mát trung hình của surrogate loss (mất mát thay thế) cho policy. Giúp cập nhật policy một cách ổn định mà không thay đổi quá lớn so với
+            # policy cũ
             mean_value_loss, mean_surrogate_loss = self.alg.update()
             stop = time.time()
             learn_time = stop - start

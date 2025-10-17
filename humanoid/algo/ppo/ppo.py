@@ -33,25 +33,32 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+# cung cấp mạng cấu trúc để tính toán action, value và log-probs
 from .actor_critic import ActorCritic
+# quản lý buffer cho rollout data(obs, action và log)
 from .rollout_storage import RolloutStorage
 
 class PPO:
     actor_critic: ActorCritic
     def __init__(self,
-                 actor_critic,
-                 num_learning_epochs=1,
-                 num_mini_batches=1,
-                 clip_param=0.2,
-                 gamma=0.998,
-                 lam=0.95,
-                 value_loss_coef=1.0,
-                 entropy_coef=0.0,
-                 learning_rate=1e-3,
-                 max_grad_norm=1.0,
-                 use_clipped_value_loss=True,
+                 actor_critic, # cung cấp cấu trúc của thuật toán
+                 num_learning_epochs=1, # số vòng epochs vòng lặp để train trên mỗi batch rollout data. Sau khi thi thập rollout, data được sử dụng nhiều lần để train. Giá trị cao hơn giúp
+                 # hội tụ tốt hơn nhưng tốn thời gian hơn
+                 num_mini_batches=1, # số mini-batch chia toàn bộ rollout data, thay vì train toàn bộ data, ta sẽ chia thành các mini-batch nhỏ để ổn định gradient. Tổng số batch 
+                 # sẽ là num_mini_bathes * num_learning_epochs
+                 clip_param=0.2,# Ngưỡng để policy để không cập nhật quá đà. Ngăn việc tăng/ giảm xác suất hành động quá mạnh
+                 gamma=0.998, # Giảm giá trị của reward xa hơn để ưu tiên reward gần. Ví dụ, reward 10 steps được nhân với gamma^10
+                 lam=0.95, #Khi huấn luyện agent trong RL, ta cần ước lượng advantage nhưng nếu tính Q bằng cách cộng lại các reward tương lai, ta bị variance cao
+                 # => ta cần trung hoà giữa bias(độ biến thiên của hệ thống, lệch tí là không biết học) và variance (độ giao động, mức độ nhạy cảm với dữ liệu huấn luyện => học thuộc lòng dữ liệu cũ) 
+                 value_loss_coef=1.0, # Hệ số nhân cho value function loss trong tổng loss. Cao hơn giúp critic hội tụ tốt; thấp ưu tiên policy. Đóng vai trò huấn luyện mạng critic, đo lường sự khác biệt
+                 # giữa giá trị dự đoán từ mạng critic và giá trị mục tiêu được tính toán từ dữ liệu rollout
+                 entropy_coef=0.0, # entropy khuyến khích exploration 
+                 learning_rate=1e-3, # learning rate sẽ kiểm soát tốc độ cập nhật weigh của mạng neural network (cả actor và critic)
+                 max_grad_norm=1.0, # là tham số dùng để cắt clip chuẩn norm của gradient trước khi cập nhật trọng số mạng nhằm ngăn hiện tượng gradient quá lớn (exploring gradients) làm cho training không ổn định
+                 # giúp việc hỗ trợ trainning ổn định hơn khi learning rate lớn hoặc khi gradient có biến động lớn
+                 use_clipped_value_loss=True, # cờ để áp dụng clipping lên value loss
                  schedule="fixed",
-                 desired_kl=0.01,
+                 desired_kl=0.01, # là ngưỡng mục tiêu cho KL divergence giữa policy cũ và policy mới được sử dụng khi bật adaptive learning rate schedule, đo lường giữa policy cũ và policy mới sau khi cập nhật
                  device='cpu',
                  ):
 
@@ -65,7 +72,8 @@ class PPO:
         self.actor_critic = actor_critic
         self.actor_critic.to(self.device)
         self.storage = None # initialized later
-        self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=learning_rate)
+        self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=learning_rate) 
+        #khởi tạo optimizer adam để tối ưu hoá (cập nhật) các tham số weights của mạng  có thể train được trong mạng
         self.transition = RolloutStorage.Transition()
 
         # PPO parameters
